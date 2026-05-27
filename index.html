@@ -2727,7 +2727,30 @@ function procesarExcelEgrAdmin(file) {
       const data = new Uint8Array(e.target.result);
       const wb = XLSX.read(data, {type:'array'});
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+      const rows = XLSX.utils.sheet_to_json(ws, {defval:'', header:1});
+      if(rows.length < 2) { showToast('⚠️ El archivo está vacío'); return; }
+
+      // Detectar encabezados por posición (fila 0)
+      const headers = rows[0].map(h => String(h||'').trim().toUpperCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g,'') // quitar tildes
+        .replace(/\s+/g,' '));
+      const col = name => {
+        const clean = name.toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ');
+        const idx = headers.indexOf(clean);
+        return idx >= 0 ? idx : -1;
+      };
+
+      // Mapear índices de columnas
+      const iAno  = col('AÑO') >= 0 ? col('AÑO') : 0;
+      const iMes  = col('MES') >= 0 ? col('MES') : 1;
+      const iNit  = col('NIT') >= 0 ? col('NIT') : 2;
+      const iProv = col('PROVEEDOR') >= 0 ? col('PROVEEDOR') : 3;
+      const iFac  = col('FATURA') >= 0 ? col('FATURA') : (col('FACTURA') >= 0 ? col('FACTURA') : 4);
+      const iFP   = col('FECHA PAGO') >= 0 ? col('FECHA PAGO') : 5;
+      const iVal  = col('VALOR') >= 0 ? col('VALOR') : 6;
+      const iTipo = col('TIPO DE GASTOS') >= 0 ? col('TIPO DE GASTOS') : 7;
+      const iDet  = col('DETALLE') >= 0 ? col('DETALLE') : 8;
+      const iMet  = col('METODO DE PAGO') >= 0 ? col('METODO DE PAGO') : 9;
 
       const MESES_MAP = {
         'ENERO':'01','FEBRERO':'02','MARZO':'03','ABRIL':'04','MAYO':'05','JUNIO':'06',
@@ -2736,23 +2759,22 @@ function procesarExcelEgrAdmin(file) {
 
       _egrAdminPendiente = [];
       let errores = 0;
-      rows.forEach((row, i) => {
-        const año  = String(row['AÑO'] || row['AÃ\u0091O'] || '').trim();
-        const mes  = String(row['MES'] || '').trim().toUpperCase();
-        const nit  = String(row['NIT'] || '').trim();
-        const prov = String(row['PROVEEDOR'] || '').trim();
-        const fac  = String(row['FATTURA'] || row['FACTURA'] || row['FATURA '] || row['FATURA'] || '').trim();
-        const fp   = row['FECHA PAGO'] || row['FECHA_PAGO'] || '';
-        const val  = parseFloat(String(row['VALOR'] || '0').replace(/[^0-9.]/g,'')) || 0;
-        const tipo = String(row['TIPO DE GASTOS'] || row['TIPO_DE_GASTOS'] || '').trim();
-        const det  = String(row['DETALLE'] || '').trim();
-        const met  = String(row['METODO DE PAGO'] || row['MÉTODO DE PAGO'] || row['METODO_DE_PAGO'] || '').trim();
+      rows.slice(1).forEach((row, i) => {
+        const año  = String(row[iAno]  || '').trim();
+        const mes  = String(row[iMes]  || '').trim().toUpperCase();
+        const nit  = String(row[iNit]  || '').trim();
+        const prov = String(row[iProv] || '').trim();
+        const fac  = String(row[iFac]  || '').trim();
+        const fp   = row[iFP] || '';
+        const val  = parseFloat(String(row[iVal] || '0').replace(/[^0-9.]/g,'')) || 0;
+        const tipo = String(row[iTipo] || '').trim();
+        const det  = String(row[iDet]  || '').trim();
+        const met  = String(row[iMet]  || '').trim();
 
         // Convertir fecha (puede venir como serial Excel o string)
         let fechaStr = '';
         if(fp) {
           if(typeof fp === 'number') {
-            // Serial date de Excel
             const d = new Date(Math.round((fp - 25569)*86400*1000));
             fechaStr = d.toISOString().slice(0,10);
           } else {
