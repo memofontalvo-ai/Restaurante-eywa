@@ -2353,11 +2353,13 @@ function renderReportes() {
   const totalEgrCaja=data.reduce((a,d)=>a+d.total_egresos,0);
   const totalEgrAdmin=mesRep ? _egrAdminCache.filter(r=>r.periodo===mesRep).reduce((a,r)=>a+r.valor,0) : _egrAdminCache.reduce((a,r)=>a+r.valor,0);
   const totalEgr=totalEgrCaja+totalEgrAdmin;
+  const totalTraslado=data.reduce((a,d)=>a+(d.traslado_fuerte||0),0);
   document.getElementById('kpis_reportes').innerHTML=`
     <div class="stat-chip"><div class="label">Total Ventas (Período)</div><div class="value gold">${fmt(totalMes)}</div><div class="sub">${data.length} días</div></div>
     <div class="stat-chip"><div class="label">Promedio Diario</div><div class="value">${fmt(promDia)}</div></div>
     <div class="stat-chip"><div class="label">Mejor Día</div><div class="value green">${fmt(maxVenta)}</div><div class="sub">${formatFecha(data.find(d=>d.total_ventas===maxVenta)?.fecha||'')}</div></div>
-    <div class="stat-chip"><div class="label">Total Egresos</div><div class="value red">${fmt(totalEgr)}</div><div class="sub">Caja: ${fmt(totalEgrCaja)} · Admin: ${fmt(totalEgrAdmin)}</div></div>`;
+    <div class="stat-chip"><div class="label">Total Egresos</div><div class="value red">${fmt(totalEgr)}</div><div class="sub">Caja: ${fmt(totalEgrCaja)} · Admin: ${fmt(totalEgrAdmin)}</div></div>
+    <div class="stat-chip"><div class="label">🏦 Traslado a Caja Fuerte</div><div class="value gold">${fmt(totalTraslado)}</div><div class="sub">Movimiento interno del período</div></div>`;
   const ultimos=data.slice(-14);
   const maxV=Math.max(...ultimos.map(d=>d.total_ventas))||1;
   document.getElementById('chart_ventas').innerHTML=ultimos.map(d=>{
@@ -2418,6 +2420,7 @@ function generarPYG() {
     if(!catMap[cat]) catMap[cat]=0; catMap[cat]+=e.val;
   }));
   const totalEgresos=Object.values(catMap).reduce((a,b)=>a+b,0);
+  const totalTraslado = data.reduce((a,d) => a + (d.traslado_fuerte||0), 0);
   // ── Egresos Administrativos del mes ──
   const egrAdmin = _egrAdminCache.filter(r => r.periodo === mes);
   const egrAdminMap = {};
@@ -2463,6 +2466,19 @@ function generarPYG() {
       <div class="pyg-line total"><span>TOTAL EGRESOS CAJA</span><span style="color:var(--red)">-${fmt(totalEgresos)}</span></div>
     </div>
     ${egrAdminSection}
+    ${totalTraslado > 0 ? `
+    <div class="divider"></div>
+    <div class="pyg-section">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🏦 Movimientos Internos</div>
+      <div class="pyg-line" style="background:rgba(201,168,76,0.05);border-radius:8px;padding:10px 12px;">
+        <span style="display:flex;align-items:center;gap:6px;">
+          <span style="background:rgba(201,168,76,0.15);color:var(--gold);padding:2px 8px;border-radius:20px;font-size:0.74rem;">INTERNO</span>
+          Traslado a Caja Fuerte
+        </span>
+        <span style="color:var(--gold);">${fmt(totalTraslado)}</span>
+      </div>
+      <div style="color:var(--text-muted);font-size:0.75rem;padding:6px 12px;">Este valor no afecta la utilidad — es un movimiento interno de efectivo.</div>
+    </div>` : ''}
     <div class="divider"></div>
     <div style="border-radius:10px;padding:20px 24px;${resultado>=0?'background:rgba(76,175,122,.08);border:1px solid rgba(76,175,122,.25);':'background:rgba(224,85,85,.08);border:1px solid rgba(224,85,85,.25);'}">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
@@ -2917,6 +2933,7 @@ function renderAnalisisGlobal() {
     const totalEgrCaja   = dias.reduce((a,d) => a + (d.total_egresos||0), 0);
     const totalEgrAdmin  = _egrAdminCache.filter(r => r.periodo === mes).reduce((a,r) => a + r.valor, 0);
     const totalEgresos   = totalEgrCaja + totalEgrAdmin;
+    const totalTraslado  = dias.reduce((a,d) => a + (d.traslado_fuerte||0), 0);
     const resultado      = totalVentas - totalEgresos;
     const promDiario     = totalVentas / dias.length;
     const mejorDia       = dias.reduce((a,b) => (b.total_ventas||0) > (a.total_ventas||0) ? b : a);
@@ -2924,7 +2941,7 @@ function renderAnalisisGlobal() {
     const totalDf        = dias.reduce((a,d) => a + (d.datafono||0), 0);
     const totalTr        = dias.reduce((a,d) => a + (d.transferencia||0), 0);
     const totalCxc       = dias.reduce((a,d) => a + (d.cxc||0), 0);
-    return { mes, nombre, diasCount: dias.length, totalVentas, totalPropinas, ventasNetas, totalEgresos, resultado, promDiario, mejorDia, totalEf, totalDf, totalTr, totalCxc };
+    return { mes, nombre, diasCount: dias.length, totalVentas, totalPropinas, ventasNetas, totalEgresos, resultado, promDiario, mejorDia, totalEf, totalDf, totalTr, totalCxc, totalTraslado };
   });
 
   // Totales globales
@@ -2933,6 +2950,7 @@ function renderAnalisisGlobal() {
   const gEgresos       = resumenMeses.reduce((a,m) => a + m.totalEgresos, 0);
   const gResultado     = resumenMeses.reduce((a,m) => a + m.resultado, 0);
   const gDias          = resumenMeses.reduce((a,m) => a + m.diasCount, 0);
+  const gTraslado      = resumenMeses.reduce((a,m) => a + (m.totalTraslado||0), 0);
   const mejorMes       = resumenMeses.reduce((a,b) => b.totalVentas > a.totalVentas ? b : a);
   const peorMes        = resumenMeses.reduce((a,b) => b.totalVentas < a.totalVentas ? b : a);
   const maxVentas      = mejorMes.totalVentas || 1;
@@ -2959,6 +2977,11 @@ function renderAnalisisGlobal() {
         <div class="label">Resultado Acumulado</div>
         <div class="value ${gResultado>=0?'green':'red'}">${fmt(gResultado)}</div>
         <div class="sub">Margen ${gVentasNetas?((gResultado/gVentasNetas)*100).toFixed(1)+'%':'—'}</div>
+      </div>
+      <div class="stat-chip">
+        <div class="label">🏦 Traslados a Caja Fuerte</div>
+        <div class="value gold">${fmt(gTraslado)}</div>
+        <div class="sub">Movimientos internos acumulados</div>
       </div>
     </div>`;
 
@@ -3010,6 +3033,7 @@ function renderAnalisisGlobal() {
       <td class="num" style="color:var(--red);">-${fmt(m.totalEgresos)}</td>
       <td class="num" style="color:${m.resultado>=0?'var(--green)':'var(--red)'};">${fmt(m.resultado)}</td>
       <td class="num" style="color:${parseFloat(margen)>=0?'var(--green)':'var(--red)'};">${margen}%</td>
+      <td class="num" style="color:var(--gold);">${fmt(m.totalTraslado||0)}</td>
       <td class="num">${varStr}</td>
     </tr>`;
   }).join('');
@@ -3084,6 +3108,7 @@ function renderAnalisisGlobal() {
               <th style="text-align:right;">Egresos</th>
               <th style="text-align:right;">Resultado</th>
               <th style="text-align:right;">Margen</th>
+              <th style="text-align:right;">🏦 Caja Fuerte</th>
               <th style="text-align:right;">vs Mes Ant.</th>
             </tr>
           </thead>
@@ -3097,6 +3122,7 @@ function renderAnalisisGlobal() {
               <td class="num" style="color:var(--red);"><strong>-${fmt(gEgresos)}</strong></td>
               <td class="num" style="color:${gResultado>=0?'var(--green)':'var(--red)'};"><strong>${fmt(gResultado)}</strong></td>
               <td class="num" style="color:${gResultado>=0?'var(--green)':'var(--red)'};"><strong>${gVentasNetas?((gResultado/gVentasNetas)*100).toFixed(1):'0'}%</strong></td>
+              <td class="num" style="color:var(--gold);"><strong>${fmt(gTraslado)}</strong></td>
               <td class="num">—</td>
             </tr>
           </tfoot>
