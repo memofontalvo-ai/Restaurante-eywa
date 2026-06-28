@@ -2431,6 +2431,14 @@ function generarPYG() {
   });
   const totalEgrAdmin = egrAdmin.reduce((a,r) => a + r.valor, 0);
   const totalEgresosFull = totalEgresos + totalEgrAdmin;
+  // ── FOOD COST (Full Cost) — compras de materia prima caja + administrativo ──
+  const foodCostCaja = catMap['Insumos / Mercado'] || 0;
+  let foodCostAdmin = 0;
+  egrAdmin.forEach(r => {
+    const t = (r.tipo_gasto||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+    if(/COSTO DE PRODUC|MATERIA PRIMA|INSUMO|MERCADO|COMPRA/.test(t)) foodCostAdmin += r.valor;
+  });
+  const foodCostTotal = foodCostCaja + foodCostAdmin;
   // Usar ventas brutas totales (con propina) como base de ingresos
   // Las propinas ya salen como egreso en los cuadres de caja
   const resultado = totalVentas - totalEgresosFull;
@@ -2444,6 +2452,24 @@ function generarPYG() {
       <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🏢 Egresos Administrativos (No afectan caja)</div>
       ${egrAdminRows}
       <div class="pyg-line total"><span>TOTAL EGRESOS ADMIN</span><span style="color:var(--red)">-${fmt(totalEgrAdmin)}</span></div>
+    </div>` : '';
+  // ── Sección Food Cost ──
+  const foodCostPct = ventasSinPropina ? (foodCostTotal/ventasSinPropina)*100 : 0;
+  const fcColor = foodCostPct <= 35 ? 'var(--green)' : (foodCostPct <= 42 ? 'var(--gold)' : 'var(--red)');
+  const foodCostSection = foodCostTotal > 0 ? `
+    <div class="divider"></div>
+    <div style="border-radius:10px;padding:18px 22px;background:rgba(91,155,213,0.06);border:1px solid rgba(91,155,213,0.25);margin-top:4px;">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;">🍽️ Food Cost (Costo de Materia Prima)</div>
+      <div class="pyg-line"><span>Compras por Caja (Insumos / Mercado)</span><span style="color:var(--text)">${fmt(foodCostCaja)}</span></div>
+      <div class="pyg-line"><span>Compras Administrativas (Costo de Producción)</span><span style="color:var(--text)">${fmt(foodCostAdmin)}</span></div>
+      <div class="pyg-line total" style="border-top:1px solid rgba(255,255,255,0.1);margin-top:6px;padding-top:10px;"><span>TOTAL FOOD COST</span><span style="color:var(--blue)">${fmt(foodCostTotal)}</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding:14px 18px;border-radius:8px;background:rgba(0,0,0,0.2);">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.05rem;">% Food Cost</div>
+          <div style="color:var(--text-muted);font-size:0.72rem;margin-top:2px;">Sobre ventas netas (sin propinas): ${fmt(ventasSinPropina)}</div>
+        </div>
+        <div style="font-size:1.8rem;font-weight:700;color:${fcColor};">${foodCostPct.toFixed(1)}%</div>
+      </div>
     </div>` : '';
   cont.innerHTML=`<div class="card">
     <div style="text-align:center;margin-bottom:24px;">
@@ -2466,6 +2492,7 @@ function generarPYG() {
       <div class="pyg-line total"><span>TOTAL EGRESOS CAJA</span><span style="color:var(--red)">-${fmt(totalEgresos)}</span></div>
     </div>
     ${egrAdminSection}
+    ${foodCostSection}
     ${totalTraslado > 0 ? `
     <div class="divider"></div>
     <div class="pyg-section">
