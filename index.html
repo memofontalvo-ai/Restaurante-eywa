@@ -2420,6 +2420,7 @@ function renderReportes() {
     <div class="stat-chip"><div class="label">Promedio Diario</div><div class="value">${fmt(promDia)}</div></div>
     <div class="stat-chip"><div class="label">Mejor Día</div><div class="value green">${fmt(maxVenta)}</div><div class="sub">${formatFecha(data.find(d=>d.total_ventas===maxVenta)?.fecha||'')}</div></div>
     <div class="stat-chip"><div class="label">Total Egresos</div><div class="value red">${fmt(totalEgr)}</div><div class="sub">Caja: ${fmt(totalEgrCaja)} · Admin: ${fmt(totalEgrAdmin)}</div></div>
+    <div class="stat-chip"><div class="label">Resultado (Ventas − Egresos)</div><div class="value ${totalMes-totalEgr>=0?'green':'red'}">${totalMes-totalEgr>=0?'+':'-'}${fmt(Math.abs(totalMes-totalEgr))}</div><div class="sub">${totalMes?(((totalMes-totalEgr)/totalMes)*100).toFixed(1):'0'}% de las ventas</div></div>
     <div class="stat-chip"><div class="label">🏦 Traslado a Caja Fuerte</div><div class="value gold">${fmt(totalTraslado)}</div><div class="sub">Movimiento interno del período</div></div>`;
   const ultimos=data.slice(-14);
   const maxV=Math.max(...ultimos.map(d=>d.total_ventas))||1;
@@ -2514,6 +2515,21 @@ function generarPYG() {
       ${egrAdminRows}
       <div class="pyg-line total"><span>TOTAL EGRESOS ADMIN</span><span style="color:var(--red)">-${fmt(totalEgrAdmin)}</span></div>
     </div>` : '';
+  // ── TOTAL EGRESOS CONSOLIDADO (caja + administrativos) ──
+  const totalEgresosSection = `
+    <div class="divider"></div>
+    <div style="border-radius:10px;padding:18px 22px;background:rgba(224,85,85,0.07);border:1px solid rgba(224,85,85,0.28);">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;">💰 Total de Egresos del Mes</div>
+      <div class="pyg-line"><span>Egresos Operacionales (Caja)</span><span style="color:var(--red)">-${fmt(totalEgresos)}</span></div>
+      <div class="pyg-line"><span>Egresos Administrativos</span><span style="color:var(--red)">-${fmt(totalEgrAdmin)}</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding:14px 18px;border-radius:8px;background:rgba(0,0,0,0.25);">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.05rem;">TOTAL EGRESOS</div>
+          <div style="color:var(--text-muted);font-size:0.72rem;margin-top:2px;">Caja + Administrativos · ${pct(totalEgresosFull, totalVentas)} de las ventas</div>
+        </div>
+        <div style="font-size:1.7rem;font-weight:700;color:var(--red);">-${fmt(totalEgresosFull)}</div>
+      </div>
+    </div>`;
   // ── Sección Food Cost ──
   const foodCostPct = ventasSinPropina ? (foodCostTotal/ventasSinPropina)*100 : 0;
   const fcColor = foodCostPct <= 35 ? 'var(--green)' : (foodCostPct <= 42 ? 'var(--gold)' : 'var(--red)');
@@ -2553,6 +2569,7 @@ function generarPYG() {
       <div class="pyg-line total"><span>TOTAL EGRESOS CAJA</span><span style="color:var(--red)">-${fmt(totalEgresos)}</span></div>
     </div>
     ${egrAdminSection}
+    ${totalEgresosSection}
     ${foodCostSection}
     ${totalTraslado > 0 ? `
     <div class="divider"></div>
