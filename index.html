@@ -1502,12 +1502,12 @@
     <div class="chpass-title">⚙️ Saldos Iniciales</div>
     <div class="chpass-sub" style="margin-bottom:6px;">Mes: <strong id="saldos-mes" style="color:var(--gold);"></strong></div>
     <div class="chpass-sub" style="margin-bottom:20px;font-size:0.78rem;">
-      Con cuanto dinero arranca el mes en cada bolsillo. Si lo dejas vacio, se calcula del mes anterior.
+      La caja registradora se arrastra sola del cuadre diario. Aqui defines con cuanto arrancan la caja fuerte y los bancos.
     </div>
 
     <div class="chpass-field">
-      <label>💵 Caja Registradora</label>
-      <input type="number" id="saldos-caja" placeholder="0">
+      <label>💵 Caja Registradora <span style="color:var(--text-muted);font-weight:400;font-size:0.75rem;">(automatico)</span></label>
+      <input type="number" id="saldos-caja" disabled style="opacity:.5;cursor:not-allowed;">
     </div>
     <div class="chpass-field">
       <label>🔒 Caja Fuerte</label>
@@ -1516,6 +1516,9 @@
     <div class="chpass-field">
       <label>🏦 Bancos</label>
       <input type="number" id="saldos-banco" placeholder="0">
+    </div>
+    <div style="color:var(--text-muted);font-size:0.74rem;margin-top:12px;line-height:1.5;">
+      El saldo de bancos lo da quien revisa el extracto bancario. Una vez definido un mes, los meses siguientes se arrastran solos.
     </div>
 
     <div style="display:flex;gap:10px;margin-top:20px;">
@@ -2706,45 +2709,69 @@ async function guardarSaldoInicial(mes, saldos) {
 }
 
 // Obtiene los saldos iniciales de un mes.
-// Si no estan definidos, los calcula a partir del mes anterior.
+// CAJA REGISTRADORA: siempre la arrastra el cuadre del primer dia del mes.
+// CAJA FUERTE y BANCOS: manuales. Si no hay valor manual, se arrastra el cierre
+// del mes anterior (pero solo si ese mes tuvo saldos definidos). Si no, cero.
 function obtenerSaldosIniciales(mes) {
-  if(_saldosCache[mes]) return { ..._saldosCache[mes], _fuente: 'manual' };
-  // Calcular desde el mes anterior
+  // ── CAJA: la arrastra el cuadre del primer dia del mes ──
+  const dias = getData().filter(d => d.fecha.startsWith(mes)).sort((a,b) => a.fecha.localeCompare(b.fecha));
+  const cajaIni = dias.length ? (dias[0].saldo_anterior || 0) : 0;
+  const fuenteCaja = dias.length
+    ? 'Arrastrado del cuadre del ' + formatFecha(dias[0].fecha)
+    : 'Sin cuadres este mes';
+
+  // ── FUERTE y BANCOS ──
+  const manual = _saldosCache[mes];
+  if(manual && (manual.fuerte !== undefined || manual.banco !== undefined)) {
+    return {
+      caja: cajaIni, _fuenteCaja: fuenteCaja,
+      fuerte: manual.fuerte || 0,
+      banco:  manual.banco  || 0,
+      _fuente: 'manual'
+    };
+  }
+  // Arrastrar del mes anterior SOLO si ese mes tenia saldos definidos
   const prev = mesAnterior(mes);
-  const calc = calcularSaldosFinales(prev);
-  if(calc) return { caja: calc.caja, fuerte: calc.fuerte, banco: calc.banco, _fuente: 'calculado', _mesPrev: prev };
-  return { caja: 0, fuerte: 0, banco: 0, _fuente: 'vacio' };
+  const cierrePrev = calcularCierreFuerteBanco(prev, 0);
+  if(cierrePrev) {
+    return {
+      caja: cajaIni, _fuenteCaja: fuenteCaja,
+      fuerte: cierrePrev.fuerte,
+      banco:  cierrePrev.banco,
+      _fuente: 'calculado', _mesPrev: prev
+    };
+  }
+  return { caja: cajaIni, _fuenteCaja: fuenteCaja, fuerte: 0, banco: 0, _fuente: 'vacio' };
+}
+
+// Cierre de fuerte y bancos de un mes. Devuelve null si nunca se definieron saldos.
+function calcularCierreFuerteBanco(mes, profundidad) {
+  profundidad = profundidad || 0;
+  if(profundidad > 24) return null;   // tope de seguridad
+
+  let ini;
+  const manual = _saldosCache[mes];
+  if(manual && (manual.fuerte !== undefined || manual.banco !== undefined)) {
+    ini = { fuerte: manual.fuerte || 0, banco: manual.banco || 0 };
+  } else {
+    const prev = calcularCierreFuerteBanco(mesAnterior(mes), profundidad + 1);
+    if(!prev) return null;   // nunca se definio un punto de partida
+    ini = prev;
+  }
+  const data = getData().filter(d => d.fecha.startsWith(mes));
+  if(data.length === 0) return ini;   // sin movimiento, el cierre es el inicial
+
+  const mov = calcularMovimientos(mes, data);
+  return {
+    fuerte: ini.fuerte + mov.fuerteEntra - mov.fuerteSale,
+    banco:  ini.banco  + mov.bancoEntra  - mov.bancoSale
+  };
 }
 
 function mesAnterior(mes) {
   const [y, m] = mes.split('-').map(Number);
   const d = new Date(y, m - 2, 1);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
-}
-
-// Calcula los saldos finales de un mes (recursivo hacia atras hasta topar saldo manual)
-function calcularSaldosFinales(mes, profundidad) {
-  profundidad = profundidad || 0;
-  if(profundidad > 24) return null;   // tope de seguridad
-  const data = getData().filter(d => d.fecha.startsWith(mes));
-  if(data.length === 0) {
-    // Sin cuadres: si hay saldo manual definido, ese es el final
-    if(_saldosCache[mes]) return { ..._saldosCache[mes] };
-    return null;
-  }
-  // Saldo inicial de este mes
-  let ini;
-  if(_saldosCache[mes]) ini = { ..._saldosCache[mes] };
-  else {
-    const prev = calcularSaldosFinales(mesAnterior(mes), profundidad + 1);
-    ini = prev || { caja: 0, fuerte: 0, banco: 0 };
-  }
-  const mov = calcularMovimientos(mes, data);
-  return {
-    caja:   ini.caja   + mov.cajaEntra   - mov.cajaSale,
-    fuerte: ini.fuerte + mov.fuerteEntra - mov.fuerteSale,
-    banco:  ini.banco  + mov.bancoEntra  - mov.bancoSale
-  };
 }
 
 // Movimientos de un mes, separados por bolsillo
@@ -2829,18 +2856,19 @@ function generarFlujoCaja() {
   const pendientePago = causadoAdmin - mov.pagosTotal;
 
   const notaFuente = ini._fuente === 'manual'
-    ? 'Saldos iniciales ingresados manualmente para este mes.'
+    ? '🔒 Caja fuerte y 🏦 bancos: saldos ingresados manualmente para este mes.'
     : (ini._fuente === 'calculado'
-        ? 'Calculado automaticamente a partir del cierre de ' + ini._mesPrev + '.'
-        : 'No hay saldos iniciales definidos. Ingresalos con el boton de arriba.');
+        ? '🔒 Caja fuerte y 🏦 bancos: arrastrados del cierre de ' + ini._mesPrev + '.'
+        : '⚠️ Caja fuerte y bancos estan en $0. Ingresalos con el boton de arriba.');
 
-  const bolsillo = (icono, titulo, sIni, entra, sale, sFin, detalleEntra, detalleSale) => `
+  const bolsillo = (icono, titulo, sIni, entra, sale, sFin, detalleEntra, detalleSale, notaIni) => `
     <div style="border-radius:10px;padding:16px 18px;background:var(--dark3);border:1px solid rgba(255,255,255,0.07);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
         <div style="font-family:'Playfair Display',serif;font-size:1rem;">${icono} ${titulo}</div>
         <div style="font-size:1.15rem;font-weight:700;color:${sFin>=0?'var(--green)':'var(--red)'}">${fmt(sFin)}</div>
       </div>
       <div class="pyg-line" style="font-size:0.8rem;"><span>Saldo inicial</span><span>${fmt(sIni)}</span></div>
+      ${notaIni ? `<div style="color:var(--text-muted);font-size:0.7rem;padding:0 12px 6px;font-style:italic;">${notaIni}</div>` : ''}
       <div class="pyg-line" style="font-size:0.8rem;"><span>Entradas</span><span style="color:var(--green)">+${fmt(entra)}</span></div>
       ${detalleEntra ? `<div style="color:var(--text-muted);font-size:0.72rem;padding:0 12px 4px;">${detalleEntra}</div>` : ''}
       <div class="pyg-line" style="font-size:0.8rem;"><span>Salidas</span><span style="color:var(--red)">-${fmt(sale)}</span></div>
@@ -2865,13 +2893,16 @@ function generarFlujoCaja() {
     <div class="grid-3" style="gap:14px;">
       ${bolsillo('💵','Caja Registradora', ini.caja, mov.cajaEntra, mov.cajaSale, finCaja,
         'Ventas efectivo ' + fmt(mov.ventasEf) + (mov.anticipoEf?' · Anticipos '+fmt(mov.anticipoEf):'') + (mov.efTerceros?' · Terceros '+fmt(mov.efTerceros):''),
-        'Egresos ' + fmt(mov.egresosCaja) + ' · Traslado a fuerte ' + fmt(mov.traslados) + (mov.pagosCaja?' · Pagos admin '+fmt(mov.pagosCaja):''))}
+        'Egresos ' + fmt(mov.egresosCaja) + ' · Traslado a fuerte ' + fmt(mov.traslados) + (mov.pagosCaja?' · Pagos admin '+fmt(mov.pagosCaja):''),
+        ini._fuenteCaja)}
       ${bolsillo('🔒','Caja Fuerte', ini.fuerte, mov.fuerteEntra, mov.fuerteSale, finFuerte,
         'Traslados recibidos ' + fmt(mov.traslados),
-        mov.pagosFuerte ? 'Pagos desde caja fuerte ' + fmt(mov.pagosFuerte) : 'Sin salidas registradas')}
+        mov.pagosFuerte ? 'Pagos desde caja fuerte ' + fmt(mov.pagosFuerte) : 'Sin salidas registradas',
+        ini._fuente === 'manual' ? 'Saldo ingresado manualmente' : (ini._fuente === 'calculado' ? 'Arrastrado de ' + ini._mesPrev : 'Falta definir el saldo inicial'))}
       ${bolsillo('🏦','Bancos', ini.banco, mov.bancoEntra, mov.bancoSale, finBanco,
         'Datafono ' + fmt(mov.ventasDf) + ' · Transferencias ' + fmt(mov.ventasTr),
-        mov.pagosBanco ? 'Pagos por banco ' + fmt(mov.pagosBanco) : 'Sin pagos administrativos importados')}
+        mov.pagosBanco ? 'Pagos por banco ' + fmt(mov.pagosBanco) : 'Sin pagos administrativos importados',
+        ini._fuente === 'manual' ? 'Saldo ingresado manualmente' : (ini._fuente === 'calculado' ? 'Arrastrado de ' + ini._mesPrev : 'Falta definir el saldo inicial'))}
     </div>
 
     <div class="divider"></div>
@@ -2945,10 +2976,11 @@ async function guardarSaldosIniciales() {
   const ov = document.getElementById('saldos-overlay');
   const mes = ov.dataset.mes;
   const num = id => parseFloat(String(document.getElementById(id).value).replace(/[^0-9.-]/g,'')) || 0;
-  const saldos = { caja: num('saldos-caja'), fuerte: num('saldos-fuerte'), banco: num('saldos-banco') };
+  // La caja NO se guarda: siempre se arrastra del cuadre del primer dia
+  const saldos = { fuerte: num('saldos-fuerte'), banco: num('saldos-banco') };
   const ok = await guardarSaldoInicial(mes, saldos);
   if(ok) {
-    showToast('✅ Saldos iniciales guardados');
+    showToast('✅ Saldos de caja fuerte y bancos guardados');
     cerrarSaldosIniciales();
     generarFlujoCaja();
   }
