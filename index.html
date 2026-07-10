@@ -1557,7 +1557,7 @@ async function saveRegistro(registro) {
     _cache.sort((a,b) => a.fecha.localeCompare(b.fecha));
   } catch(e) {
     console.error('Error guardando en Firebase:', e);
-    showToast('⚠️ Error al guardar. Verifica tu conexión.');
+    throw e; // propagar para que quien llame sepa que fallo de verdad
   }
 }
 
@@ -1969,11 +1969,55 @@ function eliminarEgreso(id) {
   renumerarEgresos(); calcular();
 }
 
+// Comprime una foto para que quepa en Firestore (limite 1MB por documento)
+function comprimirFoto(file, cb) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      // Redimensionar manteniendo proporciones (max 1000px de lado mayor)
+      let w = img.width, h = img.height;
+      const maxLado = 1000;
+      if (w > maxLado || h > maxLado) {
+        const escala = Math.min(maxLado / w, maxLado / h);
+        w = Math.round(w * escala);
+        h = Math.round(h * escala);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      // Bajar calidad hasta que pese menos de 150 KB
+      let calidad = 0.7;
+      let b64 = canvas.toDataURL('image/jpeg', calidad);
+      while (b64.length > 150 * 1024 && calidad > 0.25) {
+        calidad -= 0.1;
+        b64 = canvas.toDataURL('image/jpeg', calidad);
+      }
+      // Si aun pesa mucho, reducir dimensiones
+      if (b64.length > 150 * 1024) {
+        canvas.width = Math.round(w * 0.7);
+        canvas.height = Math.round(h * 0.7);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        b64 = canvas.toDataURL('image/jpeg', 0.55);
+      }
+      cb(b64);
+    };
+    img.onerror = () => cb(null);
+    img.src = e.target.result;
+  };
+  reader.onerror = () => cb(null);
+  reader.readAsDataURL(file);
+}
+
 function handleFotos(id, input) {
-  Array.from(input.files).forEach(file => {
-    const reader=new FileReader();
-    reader.onload=e=>{ egresoFotos[id].push(e.target.result); renderThumbs(id); };
-    reader.readAsDataURL(file);
+  const archivos = Array.from(input.files);
+  if (archivos.length) showToast('📷 Comprimiendo foto(s)...');
+  archivos.forEach(file => {
+    comprimirFoto(file, b64 => {
+      if (!b64) { showToast('⚠️ No se pudo procesar la foto'); return; }
+      egresoFotos[id].push(b64);
+      renderThumbs(id);
+    });
   });
   input.value='';
 }
@@ -2162,6 +2206,13 @@ function guardarCuadre() {
     guardado_en:new Date().toISOString()
   };
   const isUpdate = existe >= 0;
+  // Aviso preventivo: si el cuadre pesa demasiado, Firestore lo rechazara (limite 1MB)
+  const pesoAprox = JSON.stringify(registro).length;
+  if (pesoAprox > 950 * 1024) {
+    const mb = (pesoAprox / 1024 / 1024).toFixed(2);
+    alert('⚠️ Este cuadre pesa ' + mb + ' MB y supera el limite de 1 MB de la base de datos.\n\nTiene demasiadas fotos de facturas. Elimina algunas fotos e intenta de nuevo.');
+    return;
+  }
   saveRegistro(registro).then(() => {
     showToast(isUpdate ? '✏️ Cuadre actualizado' : '✅ Cuadre guardado correctamente');
     renderHistorial();
@@ -2169,7 +2220,16 @@ function guardarCuadre() {
     if(window.currentUser?.role==='cajera') setTimeout(()=>actualizarBotonesFormulario(true),100);
   }).catch(e => {
     console.error('Error guardando:', e);
-    showToast('⚠️ Error al guardar en la base de datos');
+    const msg = String(e && e.message ? e.message : e);
+    if (/maximum|exceeds|too large|entity size|invalid-argument/i.test(msg)) {
+      alert('❌ NO SE GUARDO.\n\nEl cuadre es demasiado grande para la base de datos (limite 1 MB). Normalmente pasa por tener muchas fotos de facturas.\n\nSolucion: elimina algunas fotos y guarda de nuevo.');
+    } else if (/permission|PERMISSION_DENIED/i.test(msg)) {
+      alert('❌ NO SE GUARDO.\n\nLa base de datos rechazo el permiso. Revisa las reglas de Firestore.');
+    } else if (/offline|network|unavailable/i.test(msg)) {
+      alert('❌ NO SE GUARDO.\n\nSin conexion con la base de datos. Revisa tu internet e intenta de nuevo.');
+    } else {
+      alert('❌ NO SE GUARDO.\n\nError: ' + msg);
+    }
   });
 }
 
@@ -3475,18 +3535,62 @@ function procesarArchivoExcel(file) {
       setProgress(50, `⚙️ Procesando ${total} hoja${total!==1?'s':''}...`);
 
       const results = [];
+      const problemas = [];
       wb.SheetNames.forEach((sheetName, idx) => {
         const ws = wb.Sheets[sheetName];
         const rec = parsearHojaEYWA(ws, sheetName);
-        if(rec) results.push({...rec, sheetName});
+        if(rec && rec._error) {
+          problemas.push('• "' + sheetName + '": ' + rec._error);
+        } else if(rec) {
+          if(!rec.total_ventas && !rec.total_egresos) {
+            problemas.push('• "' + sheetName + '": no tiene ventas ni egresos (hoja vacia).');
+          } else {
+            results.push({...rec, sheetName});
+          }
+        } else {
+          problemas.push('• "' + sheetName + '": no se pudo leer.');
+        }
         setProgress(50 + Math.round((idx+1)/total*40), `⚙️ Hoja ${idx+1}/${total}: ${sheetName}`);
       });
 
-      setProgress(100, '✅ Archivo leído — listo para guardar');
+      // ── VALIDACION 1: fechas duplicadas dentro del archivo ──
+      const vistas = {};
+      results.forEach(r => {
+        if(vistas[r.fecha]) problemas.push('• Fecha repetida ' + r.fecha + ' en las hojas "' + vistas[r.fecha] + '" y "' + r.sheetName + '".');
+        else vistas[r.fecha] = r.sheetName;
+      });
 
-      // Guardar results en variable global para el botón
-      window._importResults = results.filter(rec => rec.total_ventas || rec.total_egresos);
-      const omitidos = results.length - window._importResults.length;
+      // ── VALIDACION 2: todas las hojas deben ser del mismo mes ──
+      const meses = [...new Set(results.map(r => r.fecha.slice(0,7)))];
+      if(meses.length > 1) {
+        problemas.push('• El archivo mezcla varios meses: ' + meses.join(', ') + '. Importa un mes a la vez.');
+      }
+
+      // ── SI HAY CUALQUIER PROBLEMA: RECHAZAR TODO EL ARCHIVO ──
+      if(problemas.length) {
+        setProgress(0, '❌ Archivo rechazado');
+        importando = false;
+        document.getElementById('btn-import-close').textContent = 'Cerrar';
+        document.getElementById('btn-import-close').disabled = false;
+        const btnS = document.getElementById('btn-import-save');
+        if(btnS) btnS.style.display = 'none';   // no se puede guardar
+        window._importResults = [];
+        const sumEl = document.getElementById('import-summary');
+        if(sumEl) {
+          sumEl.style.display = 'block';
+          sumEl.className = 'import-summary warn';
+          sumEl.innerHTML = '<strong>❌ ARCHIVO RECHAZADO — no se guardo nada</strong><br>' +
+            '<span style="font-size:0.78rem;white-space:pre-line">' + problemas.join('\n') + '</span>';
+        }
+        alert('❌ ESTE ARCHIVO NO SE PUEDE SUBIR PORQUE CONTIENE ERRORES.\n\n' +
+              problemas.join('\n') +
+              '\n\nNo se guardo ningun dato. Corrige el archivo e intenta de nuevo.');
+        return;
+      }
+
+      setProgress(100, '✅ Archivo verificado — listo para guardar');
+      window._importResults = results;
+      const omitidos = 0;
 
       // Mostrar resultados pero NO guardar aún
       mostrarResultadosImport(results, 0, 0, omitidos);
@@ -3549,6 +3653,32 @@ async function guardarImportFirebase() {
     btnClose.textContent = 'Cerrar';
     showToast('❌ Error de conexion con Firebase');
     return;
+  }
+
+  // ── PROTECCION: avisar que dias ya existen y se van a SOBREESCRIBIR ──
+  progTxt.textContent = '🔎 Verificando dias existentes...';
+  const yaExisten = [];
+  try {
+    for(const rec of results) {
+      const snap = await db.collection(COLLECTION).doc(rec.fecha).get();
+      if(snap.exists) yaExisten.push(rec.fecha);
+    }
+  } catch(e) {
+    console.error('Error verificando existentes:', e);
+  }
+  if(yaExisten.length) {
+    const ok = confirm('⚠️ ATENCION\n\nEstos ' + yaExisten.length + ' dia(s) YA EXISTEN en la base de datos y seran REEMPLAZADOS:\n\n' +
+                       yaExisten.join('\n') +
+                       '\n\nSus datos actuales se perderan.\n\n¿Deseas continuar?');
+    if(!ok) {
+      progTxt.textContent = 'Importacion cancelada — no se guardo nada';
+      btnSave.disabled = false;
+      btnSave.textContent = '💾 Guardar ' + results.length + ' dia(s)';
+      btnClose.disabled = false;
+      btnClose.textContent = 'Cerrar';
+      showToast('Importacion cancelada');
+      return;
+    }
   }
 
   for(let i = 0; i < results.length; i++) {
@@ -3688,38 +3818,62 @@ const SHEET_DATES = {
   'AGOSTO 31':'2026-08-31',
 };
 
+// Devuelve {fecha:'YYYY-MM-DD'} o {error:'motivo'} — NUNCA adivina.
 function inferirFecha(sheetName, ws) {
-  // 1. Try known map
-  const upper = sheetName.trim().toUpperCase();
-  if(SHEET_DATES[upper]) return SHEET_DATES[upper];
+  const MESES = {ENERO:'01',FEBRERO:'02',MARZO:'03',ABRIL:'04',MAYO:'05',
+                 JUNIO:'06',JULIO:'07',AGOSTO:'08',SEPTIEMBRE:'09',
+                 OCTUBRE:'10',NOVIEMBRE:'11',DICIEMBRE:'12'};
+  const limpiar = s => String(s||'').toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/\s+/g,' ').trim();
 
-  // 2. Try to parse from cell B3 (row2, col1) e.g. "MARTES 5 DE MAYO 2026"
-  const fechaTxt = celdaTxt(ws, 2, 1).toUpperCase();
-  const meses = {ENERO:'01',FEBRERO:'02',MARZO:'03',ABRIL:'04',MAYO:'05',
-                  JUNIO:'06',JULIO:'07',AGOSTO:'08',SEPTIEMBRE:'09',
-                  OCTUBRE:'10',NOVIEMBRE:'11',DICIEMBRE:'12'};
-  const m = fechaTxt.match(/(\d{1,2})\s+DE\s+(\w+)\s+(\d{4})/);
-  if(m) {
-    const mes = meses[m[2]];
-    if(mes) return `${m[3]}-${mes}-${m[1].padStart(2,'0')}`;
+  const validar = (a,m,d) => {
+    const anio = parseInt(a,10), mes = parseInt(m,10), dia = parseInt(d,10);
+    if(anio < 2020 || anio > 2100) return null;
+    if(mes < 1 || mes > 12) return null;
+    const diasMes = new Date(anio, mes, 0).getDate();
+    if(dia < 1 || dia > diasMes) return null;
+    return `${anio}-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`;
+  };
+
+  // ── FUENTE 1 (autoridad): la fecha escrita dentro de la hoja, celda B3 ──
+  const fechaTxt = limpiar(celdaTxt(ws, 2, 1));
+  let fechaB3 = null;
+  const m = fechaTxt.match(/(\d{1,2})\s+(?:DE\s+)?([A-Z]+)\s+(?:DE\s+)?(\d{4})/);
+  if(m && MESES[m[2]]) fechaB3 = validar(m[3], MESES[m[2]], m[1]);
+
+  if(!fechaB3) {
+    return { error: 'No se pudo leer la fecha en la celda B3. Dice: "' +
+             (fechaTxt || '(vacia)') + '". Debe decir algo como "LUNES 1 JULIO 2026".' };
   }
 
-  // 3. Try sheet name like "17" or "MAYO 17"
-  const numM = upper.match(/(\d{1,2})$/);
-  if(numM) {
-    const day = numM[1].padStart(2,'0');
-    return `2026-05-${day}`; // default to May
+  // ── FUENTE 2 (verificacion): el nombre de la pestaña ──
+  // Si el nombre indica un mes/dia distinto al de B3, NO adivinamos: avisamos.
+  const upper = limpiar(sheetName);
+  const mn = upper.match(/^([A-Z]+)\s*(\d{1,2})$/);
+  if(mn && MESES[mn[1]]) {
+    const mesNombre = MESES[mn[1]];
+    const diaNombre = mn[2].padStart(2,'0');
+    const mesB3 = fechaB3.slice(5,7);
+    const diaB3 = fechaB3.slice(8,10);
+    if(mesNombre !== mesB3 || diaNombre !== diaB3) {
+      return { error: 'La pestaña se llama "' + sheetName + '" pero la fecha interna (B3) dice ' +
+               fechaB3 + '. Corrige el nombre de la pestaña o la celda B3 para que coincidan.' };
+    }
   }
-  return null;
+  return { fecha: fechaB3 };
 }
 
 function parsearHojaEYWA(ws, sheetName) {
-  const fecha = inferirFecha(sheetName, ws);
-  if(!fecha) return null;
+  const res = inferirFecha(sheetName, ws);
+  if(res.error) return { _error: res.error };
+  const fecha = res.fecha;
 
   // Validar que es hoja EYWA
   const titulo = celdaTxt(ws, 0, 1).toUpperCase() + celdaTxt(ws, 4, 0).toUpperCase();
-  if(!titulo.includes('EYWA') && !titulo.includes('MEDIOS')) return null;
+  if(!titulo.includes('EYWA') && !titulo.includes('MEDIOS')) {
+    return { _error: 'No parece una hoja de cuadre EYWA (falta el titulo RESTAURANTE EYWA).' };
+  }
 
   // ── Cajero ──
   const cajero = celdaTxt(ws, 1, 1) || 'Yenny Alexandra Gomez';
