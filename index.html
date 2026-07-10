@@ -1495,6 +1495,36 @@
 </div>
 </div>
 
+
+<!-- ════════ MODAL SALDOS INICIALES ════════ -->
+<div id="saldos-overlay" class="chpass-overlay" style="display:none;" onclick="if(event.target===this)cerrarSaldosIniciales()">
+  <div class="chpass-box" style="max-width:430px;">
+    <div class="chpass-title">⚙️ Saldos Iniciales</div>
+    <div class="chpass-sub" style="margin-bottom:6px;">Mes: <strong id="saldos-mes" style="color:var(--gold);"></strong></div>
+    <div class="chpass-sub" style="margin-bottom:20px;font-size:0.78rem;">
+      Con cuanto dinero arranca el mes en cada bolsillo. Si lo dejas vacio, se calcula del mes anterior.
+    </div>
+
+    <div class="chpass-field">
+      <label>💵 Caja Registradora</label>
+      <input type="number" id="saldos-caja" placeholder="0">
+    </div>
+    <div class="chpass-field">
+      <label>🔒 Caja Fuerte</label>
+      <input type="number" id="saldos-fuerte" placeholder="0">
+    </div>
+    <div class="chpass-field">
+      <label>🏦 Bancos</label>
+      <input type="number" id="saldos-banco" placeholder="0">
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:20px;">
+      <button class="btn btn-gold" style="flex:1;" onclick="guardarSaldosIniciales()">Guardar</button>
+      <button class="btn btn-outline" style="flex:1;" onclick="cerrarSaldosIniciales()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
 <!-- ════════ MODAL CONFIRMAR LIMPIEZA ════════ -->
 <div id="limpiar-overlay" class="chpass-overlay" style="display:none;" onclick="if(event.target===this)cerrarLimpieza()">
   <div class="chpass-box" style="max-width:400px;">
@@ -1755,6 +1785,7 @@ function doLogin() {
   cargarDatosFirebase();
   cargarEgresosAdminFirebase();
   cargarPagosAdminFirebase();
+  cargarSaldosIniciales();
 }
 
 function doLogout() {
@@ -2647,6 +2678,116 @@ function generarPYG() {
 const COLL_PAGOS_ADMIN = 'pagos_admin';
 let _pagosAdminCache = [];
 
+// Saldos iniciales por mes: caja registradora, caja fuerte y bancos
+const COLL_SALDOS = 'saldos_iniciales';
+let _saldosCache = {};   // { '2026-07': {caja:0, fuerte:0, banco:0} }
+
+async function cargarSaldosIniciales() {
+  try {
+    const snap = await db.collection(COLL_SALDOS).get();
+    _saldosCache = {};
+    snap.docs.forEach(d => { _saldosCache[d.id] = d.data(); });
+  } catch(e) {
+    _saldosCache = {};
+  }
+}
+
+async function guardarSaldoInicial(mes, saldos) {
+  if(!db) { showToast('⚠️ Sin conexion'); return false; }
+  try {
+    await db.collection(COLL_SALDOS).doc(mes).set(saldos);
+    _saldosCache[mes] = saldos;
+    return true;
+  } catch(e) {
+    console.error('Error guardando saldos:', e);
+    showToast('⚠️ Error al guardar los saldos');
+    return false;
+  }
+}
+
+// Obtiene los saldos iniciales de un mes.
+// Si no estan definidos, los calcula a partir del mes anterior.
+function obtenerSaldosIniciales(mes) {
+  if(_saldosCache[mes]) return { ..._saldosCache[mes], _fuente: 'manual' };
+  // Calcular desde el mes anterior
+  const prev = mesAnterior(mes);
+  const calc = calcularSaldosFinales(prev);
+  if(calc) return { caja: calc.caja, fuerte: calc.fuerte, banco: calc.banco, _fuente: 'calculado', _mesPrev: prev };
+  return { caja: 0, fuerte: 0, banco: 0, _fuente: 'vacio' };
+}
+
+function mesAnterior(mes) {
+  const [y, m] = mes.split('-').map(Number);
+  const d = new Date(y, m - 2, 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+// Calcula los saldos finales de un mes (recursivo hacia atras hasta topar saldo manual)
+function calcularSaldosFinales(mes, profundidad) {
+  profundidad = profundidad || 0;
+  if(profundidad > 24) return null;   // tope de seguridad
+  const data = getData().filter(d => d.fecha.startsWith(mes));
+  if(data.length === 0) {
+    // Sin cuadres: si hay saldo manual definido, ese es el final
+    if(_saldosCache[mes]) return { ..._saldosCache[mes] };
+    return null;
+  }
+  // Saldo inicial de este mes
+  let ini;
+  if(_saldosCache[mes]) ini = { ..._saldosCache[mes] };
+  else {
+    const prev = calcularSaldosFinales(mesAnterior(mes), profundidad + 1);
+    ini = prev || { caja: 0, fuerte: 0, banco: 0 };
+  }
+  const mov = calcularMovimientos(mes, data);
+  return {
+    caja:   ini.caja   + mov.cajaEntra   - mov.cajaSale,
+    fuerte: ini.fuerte + mov.fuerteEntra - mov.fuerteSale,
+    banco:  ini.banco  + mov.bancoEntra  - mov.bancoSale
+  };
+}
+
+// Movimientos de un mes, separados por bolsillo
+function calcularMovimientos(mes, data) {
+  data = data || getData().filter(d => d.fecha.startsWith(mes));
+  const suma = (f) => data.reduce((a, d) => a + (f(d) || 0), 0);
+
+  // CAJA REGISTRADORA
+  const ventasEf   = suma(d => d.efectivo);
+  const anticipoEf = suma(d => d.anticipo_ef);
+  const efTerceros = suma(d => d.ef_terceros);
+  const egresosCaja= suma(d => d.total_egresos);
+  const traslados  = suma(d => d.traslado_fuerte);
+
+  // BANCOS
+  const ventasDf = suma(d => d.datafono);
+  const ventasTr = suma(d => d.transferencia);
+
+  // Pagos administrativos del mes, separados por medio de pago
+  const pagos = _pagosAdminCache.filter(p =>
+    (p.periodo_pago || String(p.fecha_pago || '').slice(0, 7)) === mes);
+  const esBanco = p => /BANCO|TRANSFEREN|CONSIGNA|PSE|CHEQUE/i.test(String(p.metodo_pago || ''));
+  const esFuerte = p => /FUERTE/i.test(String(p.metodo_pago || ''));
+  const pagosBanco  = pagos.filter(esBanco).reduce((a, p) => a + (p.valor || 0), 0);
+  const pagosFuerte = pagos.filter(p => !esBanco(p) && esFuerte(p)).reduce((a, p) => a + (p.valor || 0), 0);
+  const pagosCaja   = pagos.filter(p => !esBanco(p) && !esFuerte(p)).reduce((a, p) => a + (p.valor || 0), 0);
+
+  return {
+    cajaEntra:   ventasEf + anticipoEf + efTerceros,
+    cajaSale:    egresosCaja + traslados + pagosCaja,
+    fuerteEntra: traslados,
+    fuerteSale:  pagosFuerte,
+    bancoEntra:  ventasDf + ventasTr,
+    bancoSale:   pagosBanco,
+    // detalle para mostrar
+    ventasEf, ventasDf, ventasTr, anticipoEf, efTerceros,
+    egresosCaja, traslados, pagosCaja, pagosFuerte, pagosBanco,
+    pagosTotal: pagosCaja + pagosFuerte + pagosBanco,
+    propinas: suma(d => d.propina),
+    cxc: suma(d => d.cxc)
+  };
+}
+
 async function cargarPagosAdminFirebase() {
   try {
     const snap = await db.collection(COLL_PAGOS_ADMIN).get();
@@ -2662,8 +2803,7 @@ function generarFlujoCaja() {
   const cont = document.getElementById('flujo_content');
   if(!mes) { cont.innerHTML = '<div class="card" style="text-align:center;padding:40px;color:var(--text-muted);">Selecciona un mes.</div>'; return; }
 
-  const todos = getData();
-  const data = todos.filter(d => d.fecha.startsWith(mes)).sort((a,b) => a.fecha.localeCompare(b.fecha));
+  const data = getData().filter(d => d.fecha.startsWith(mes)).sort((a,b) => a.fecha.localeCompare(b.fecha));
   if(data.length === 0) {
     cont.innerHTML = '<div class="card" style="text-align:center;padding:40px;color:var(--text-muted);">No hay cuadres registrados para este mes.</div>';
     return;
@@ -2672,99 +2812,91 @@ function generarFlujoCaja() {
   const [year, mon] = mes.split('-');
   const nombreMes = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][parseInt(mon)-1];
 
-  // ── SALDO INICIAL: saldo final del ultimo cuadre ANTERIOR a este mes ──
-  const anteriores = todos.filter(d => d.fecha < mes + '-01').sort((a,b) => a.fecha.localeCompare(b.fecha));
-  const saldoInicial = anteriores.length ? (anteriores[anteriores.length-1].saldo_final || 0) : 0;
-  const fuenteSaldo = anteriores.length
-    ? 'Saldo final del ' + formatFecha(anteriores[anteriores.length-1].fecha)
-    : 'Sin mes anterior registrado — se asume $0';
+  const ini = obtenerSaldosIniciales(mes);
+  const mov = calcularMovimientos(mes, data);
 
-  // ── ENTRADAS: ventas que entran de verdad (CxC NO entra hasta cobrarse) ──
-  const totalEf = data.reduce((a,d) => a + (d.efectivo||0), 0);
-  const totalDf = data.reduce((a,d) => a + (d.datafono||0), 0);
-  const totalTr = data.reduce((a,d) => a + (d.transferencia||0), 0);
-  const totalCxc = data.reduce((a,d) => a + (d.cxc||0), 0);
-  const totalPropinas = data.reduce((a,d) => a + (d.propina||0), 0);
-  const recaudado = totalEf + totalDf + totalTr;   // incluye propinas, excluye CxC
+  const finCaja   = ini.caja   + mov.cajaEntra   - mov.cajaSale;
+  const finFuerte = ini.fuerte + mov.fuerteEntra - mov.fuerteSale;
+  const finBanco  = ini.banco  + mov.bancoEntra  - mov.bancoSale;
 
-  // Otros ingresos de efectivo registrados en el cuadre
-  const anticipoEf = data.reduce((a,d) => a + (d.anticipo_ef||0), 0);
-  const efTerceros = data.reduce((a,d) => a + (d.ef_terceros||0), 0);
-  const totalEntradas = recaudado + anticipoEf + efTerceros;
+  const totalIni = ini.caja + ini.fuerte + ini.banco;
+  const totalFin = finCaja + finFuerte + finBanco;
+  const totalEntradas = mov.cajaEntra + mov.bancoEntra;          // traslado es interno, no suma
+  const totalSalidas  = mov.egresosCaja + mov.pagosTotal;        // traslado es interno, no resta
 
-  // ── SALIDAS ──
-  const egresosCaja = data.reduce((a,d) => a + (d.total_egresos||0), 0);
-  const pagosAdmin = _pagosAdminCache
-    .filter(p => (p.periodo_pago || String(p.fecha_pago||'').slice(0,7)) === mes)
-    .reduce((a,p) => a + (p.valor||0), 0);
-  const totalSalidas = egresosCaja + pagosAdmin;
-
-  // ── SALDO FINAL ──
-  const saldoFinal = saldoInicial + totalEntradas - totalSalidas;
-
-  // ── Traslados a caja fuerte (movimiento interno, informativo) ──
-  const traslados = data.reduce((a,d) => a + (d.traslado_fuerte||0), 0);
-
-  // ── Facturas administrativas causadas este mes (deuda) ──
+  // Facturas causadas vs pagadas
   const causadoAdmin = _egrAdminCache.filter(r => r.periodo === mes).reduce((a,r) => a + r.valor, 0);
-  const pendientePago = causadoAdmin - pagosAdmin;
+  const pendientePago = causadoAdmin - mov.pagosTotal;
 
-  const fmtPct = (v, base) => base ? ((v/base)*100).toFixed(1) + '%' : '0%';
+  const notaFuente = ini._fuente === 'manual'
+    ? 'Saldos iniciales ingresados manualmente para este mes.'
+    : (ini._fuente === 'calculado'
+        ? 'Calculado automaticamente a partir del cierre de ' + ini._mesPrev + '.'
+        : 'No hay saldos iniciales definidos. Ingresalos con el boton de arriba.');
+
+  const bolsillo = (icono, titulo, sIni, entra, sale, sFin, detalleEntra, detalleSale) => `
+    <div style="border-radius:10px;padding:16px 18px;background:var(--dark3);border:1px solid rgba(255,255,255,0.07);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div style="font-family:'Playfair Display',serif;font-size:1rem;">${icono} ${titulo}</div>
+        <div style="font-size:1.15rem;font-weight:700;color:${sFin>=0?'var(--green)':'var(--red)'}">${fmt(sFin)}</div>
+      </div>
+      <div class="pyg-line" style="font-size:0.8rem;"><span>Saldo inicial</span><span>${fmt(sIni)}</span></div>
+      <div class="pyg-line" style="font-size:0.8rem;"><span>Entradas</span><span style="color:var(--green)">+${fmt(entra)}</span></div>
+      ${detalleEntra ? `<div style="color:var(--text-muted);font-size:0.72rem;padding:0 12px 4px;">${detalleEntra}</div>` : ''}
+      <div class="pyg-line" style="font-size:0.8rem;"><span>Salidas</span><span style="color:var(--red)">-${fmt(sale)}</span></div>
+      ${detalleSale ? `<div style="color:var(--text-muted);font-size:0.72rem;padding:0 12px 4px;">${detalleSale}</div>` : ''}
+      <div class="pyg-line total" style="font-size:0.85rem;border-top:1px solid rgba(255,255,255,0.08);margin-top:6px;padding-top:8px;">
+        <span>Saldo final</span><span style="color:${sFin>=0?'var(--green)':'var(--red)'}">${fmt(sFin)}</span>
+      </div>
+    </div>`;
 
   cont.innerHTML = `<div class="card">
-    <div style="text-align:center;margin-bottom:24px;">
+    <div style="text-align:center;margin-bottom:20px;">
       <div style="font-family:'Playfair Display',serif;font-size:1.6rem;color:var(--gold);">RESTAURANTE EYWA</div>
       <div style="color:var(--text-muted);font-size:0.9rem;margin-top:4px;">Flujo de Caja — ${nombreMes} ${year}</div>
-      <div style="color:var(--text-muted);font-size:0.78rem;margin-top:2px;">${data.length} días operados</div>
+      <div style="color:var(--text-muted);font-size:0.78rem;margin-top:2px;">${data.length} dias operados</div>
     </div>
 
-    <div class="pyg-section">
-      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🏁 Saldo Inicial</div>
-      <div class="pyg-line total"><span>Saldo al iniciar el mes</span><span style="color:var(--gold)">${fmt(saldoInicial)}</span></div>
-      <div style="color:var(--text-muted);font-size:0.74rem;padding:4px 12px;">${fuenteSaldo}</div>
+    <div style="display:flex;justify-content:center;margin-bottom:18px;">
+      <button class="btn btn-outline" onclick="abrirSaldosIniciales('${mes}')">⚙️ Editar saldos iniciales</button>
     </div>
+    <div style="color:var(--text-muted);font-size:0.74rem;text-align:center;margin-bottom:18px;">${notaFuente}</div>
 
-    <div class="divider"></div>
-    <div class="pyg-section">
-      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">📥 Entradas de Dinero</div>
-      <div class="pyg-line"><span>Ventas en Efectivo</span><span style="color:var(--green)">+${fmt(totalEf)}</span></div>
-      <div class="pyg-line"><span>Ventas por Datáfono</span><span style="color:var(--green)">+${fmt(totalDf)}</span></div>
-      <div class="pyg-line"><span>Ventas por Transferencia</span><span style="color:var(--green)">+${fmt(totalTr)}</span></div>
-      ${anticipoEf ? `<div class="pyg-line"><span>Anticipos en Efectivo</span><span style="color:var(--green)">+${fmt(anticipoEf)}</span></div>` : ''}
-      ${efTerceros ? `<div class="pyg-line"><span>Efectivo de Terceros</span><span style="color:var(--green)">+${fmt(efTerceros)}</span></div>` : ''}
-      <div class="pyg-line total"><span>TOTAL ENTRADAS</span><span style="color:var(--green)">+${fmt(totalEntradas)}</span></div>
-      <div style="color:var(--text-muted);font-size:0.74rem;padding:6px 12px;">Incluye propinas por ${fmt(totalPropinas)}. Las ventas a crédito (CxC) por ${fmt(totalCxc)} NO se cuentan hasta cobrarse.</div>
-    </div>
-
-    <div class="divider"></div>
-    <div class="pyg-section">
-      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">📤 Salidas de Dinero</div>
-      <div class="pyg-line"><span>Egresos pagados por Caja</span><span style="color:var(--red)">-${fmt(egresosCaja)}</span></div>
-      <div class="pyg-line">
-        <span>Pagos de Facturas Administrativas</span>
-        <span style="color:var(--red)">-${fmt(pagosAdmin)}</span>
-      </div>
-      ${pagosAdmin === 0 ? `<div style="color:var(--text-muted);font-size:0.74rem;padding:4px 12px;">Aún no se han importado pagos administrativos para este mes.</div>` : ''}
-      <div class="pyg-line total"><span>TOTAL SALIDAS</span><span style="color:var(--red)">-${fmt(totalSalidas)}</span></div>
+    <div class="grid-3" style="gap:14px;">
+      ${bolsillo('💵','Caja Registradora', ini.caja, mov.cajaEntra, mov.cajaSale, finCaja,
+        'Ventas efectivo ' + fmt(mov.ventasEf) + (mov.anticipoEf?' · Anticipos '+fmt(mov.anticipoEf):'') + (mov.efTerceros?' · Terceros '+fmt(mov.efTerceros):''),
+        'Egresos ' + fmt(mov.egresosCaja) + ' · Traslado a fuerte ' + fmt(mov.traslados) + (mov.pagosCaja?' · Pagos admin '+fmt(mov.pagosCaja):''))}
+      ${bolsillo('🔒','Caja Fuerte', ini.fuerte, mov.fuerteEntra, mov.fuerteSale, finFuerte,
+        'Traslados recibidos ' + fmt(mov.traslados),
+        mov.pagosFuerte ? 'Pagos desde caja fuerte ' + fmt(mov.pagosFuerte) : 'Sin salidas registradas')}
+      ${bolsillo('🏦','Bancos', ini.banco, mov.bancoEntra, mov.bancoSale, finBanco,
+        'Datafono ' + fmt(mov.ventasDf) + ' · Transferencias ' + fmt(mov.ventasTr),
+        mov.pagosBanco ? 'Pagos por banco ' + fmt(mov.pagosBanco) : 'Sin pagos administrativos importados')}
     </div>
 
     <div class="divider"></div>
-    <div style="border-radius:10px;padding:20px 24px;${saldoFinal>=0?'background:rgba(76,175,122,.08);border:1px solid rgba(76,175,122,.25);':'background:rgba(224,85,85,.08);border:1px solid rgba(224,85,85,.25);'}">
+    <div style="border-radius:10px;padding:20px 24px;${totalFin>=0?'background:rgba(76,175,122,.08);border:1px solid rgba(76,175,122,.25);':'background:rgba(224,85,85,.08);border:1px solid rgba(224,85,85,.25);'}">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
         <div>
-          <div style="font-family:'Playfair Display',serif;font-size:1.15rem;">${saldoFinal>=0?'💵 Saldo Final de Caja':'🔻 Saldo Negativo'}</div>
-          <div style="color:var(--text-muted);font-size:0.8rem;margin-top:2px;">Inicial ${fmt(saldoInicial)} + Entradas ${fmt(totalEntradas)} − Salidas ${fmt(totalSalidas)}</div>
-          <div style="color:var(--text-muted);font-size:0.75rem;margin-top:2px;">Este será el saldo inicial del mes siguiente.</div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.15rem;">💰 Disponible Total</div>
+          <div style="color:var(--text-muted);font-size:0.8rem;margin-top:2px;">Inicial ${fmt(totalIni)} + Entradas ${fmt(totalEntradas)} − Salidas ${fmt(totalSalidas)}</div>
+          <div style="color:var(--text-muted);font-size:0.75rem;margin-top:2px;">Caja ${fmt(finCaja)} · Fuerte ${fmt(finFuerte)} · Bancos ${fmt(finBanco)}</div>
         </div>
-        <div style="font-size:2rem;font-weight:700;color:${saldoFinal>=0?'var(--green)':'var(--red)'}">${fmt(saldoFinal)}</div>
+        <div style="font-size:2rem;font-weight:700;color:${totalFin>=0?'var(--green)':'var(--red)'}">${fmt(totalFin)}</div>
       </div>
+    </div>
+
+    <div class="divider"></div>
+    <div style="color:var(--text-muted);font-size:0.74rem;padding:0 4px 10px;">
+      Las ventas a credito (CxC) por ${fmt(mov.cxc)} NO entran al flujo hasta cobrarse. Las entradas incluyen propinas por ${fmt(mov.propinas)}.
+      El traslado a caja fuerte (${fmt(mov.traslados)}) es un movimiento interno: sale de caja y entra a la fuerte, no cambia el disponible total.
     </div>
 
     <div class="divider"></div>
     <div style="border-radius:10px;padding:18px 22px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.25);">
       <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;">📋 Facturas Administrativas (causadas vs pagadas)</div>
       <div class="pyg-line"><span>Causado este mes (facturas recibidas)</span><span style="color:var(--text)">${fmt(causadoAdmin)}</span></div>
-      <div class="pyg-line"><span>Pagado este mes</span><span style="color:var(--green)">${fmt(pagosAdmin)}</span></div>
+      <div class="pyg-line"><span>Pagado este mes</span><span style="color:var(--green)">${fmt(mov.pagosTotal)}</span></div>
       <div class="pyg-line total" style="border-top:1px solid rgba(255,255,255,0.1);margin-top:6px;padding-top:10px;">
         <span>PENDIENTE POR PAGAR</span>
         <span style="color:${pendientePago>0?'var(--gold)':'var(--green)'}">${fmt(pendientePago)}</span>
@@ -2772,32 +2904,10 @@ function generarFlujoCaja() {
       <div style="color:var(--text-muted);font-size:0.74rem;padding:6px 12px;">Las facturas causadas NO afectan el flujo de caja hasta que se pagan.</div>
     </div>
 
-    ${traslados > 0 ? `
-    <div class="divider"></div>
-    <div class="pyg-section">
-      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🏦 Movimientos Internos</div>
-      <div class="pyg-line" style="background:rgba(201,168,76,0.05);border-radius:8px;padding:10px 12px;">
-        <span style="display:flex;align-items:center;gap:6px;">
-          <span style="background:rgba(201,168,76,0.15);color:var(--gold);padding:2px 8px;border-radius:20px;font-size:0.74rem;">INTERNO</span>
-          Traslado a Caja Fuerte
-        </span>
-        <span style="color:var(--gold);">${fmt(traslados)}</span>
-      </div>
-      <div style="color:var(--text-muted);font-size:0.75rem;padding:6px 12px;">Ya está descontado dentro del saldo final de cada cuadre.</div>
-    </div>` : ''}
-
-    <div class="divider"></div>
-    <div class="grid-4" style="margin-top:4px;">
-      <div class="stat-chip"><div class="label">Entradas</div><div class="value green">${fmt(totalEntradas)}</div></div>
-      <div class="stat-chip"><div class="label">Salidas</div><div class="value red">${fmt(totalSalidas)}</div></div>
-      <div class="stat-chip"><div class="label">Variación de Caja</div><div class="value ${(totalEntradas-totalSalidas)>=0?'green':'red'}">${(totalEntradas-totalSalidas)>=0?'+':'-'}${fmt(Math.abs(totalEntradas-totalSalidas))}</div></div>
-      <div class="stat-chip"><div class="label">Salidas / Entradas</div><div class="value">${fmtPct(totalSalidas, totalEntradas)}</div></div>
-    </div>
-
     <div class="divider"></div>
     <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">📆 Detalle Diario</div>
     <div class="tbl-wrap"><table class="tbl"><thead><tr>
-      <th>Fecha</th><th>Efectivo</th><th>Datáfono</th><th>Transfer.</th><th>Entradas</th><th>Egresos Caja</th><th>Neto del Día</th>
+      <th>Fecha</th><th>Efectivo</th><th>Datafono</th><th>Transfer.</th><th>Egresos Caja</th><th>Traslado</th><th>Neto del Dia</th>
     </tr></thead><tbody>
     ${data.map(d => {
       const ent = (d.efectivo||0)+(d.datafono||0)+(d.transferencia||0);
@@ -2807,14 +2917,43 @@ function generarFlujoCaja() {
         <td class="num">${fmt(d.efectivo||0)}</td>
         <td class="num">${fmt(d.datafono||0)}</td>
         <td class="num">${fmt(d.transferencia||0)}</td>
-        <td class="num" style="color:var(--green)">${fmt(ent)}</td>
         <td class="num" style="color:var(--red)">${fmt(d.total_egresos||0)}</td>
+        <td class="num" style="color:var(--gold)">${fmt(d.traslado_fuerte||0)}</td>
         <td class="num" style="color:${neto>=0?'var(--green)':'var(--red)'}">${neto>=0?'+':'-'}${fmt(Math.abs(neto))}</td>
       </tr>`;
     }).join('')}
     </tbody></table></div>
   </div>`;
 }
+
+// ── Modal para editar los saldos iniciales del mes ──
+function abrirSaldosIniciales(mes) {
+  if(window.currentUser?.role !== 'admin') { showToast('⚠️ Solo el Administrador puede editar los saldos'); return; }
+  const s = obtenerSaldosIniciales(mes);
+  const ov = document.getElementById('saldos-overlay');
+  document.getElementById('saldos-mes').textContent = mes;
+  document.getElementById('saldos-caja').value   = Math.round(s.caja || 0);
+  document.getElementById('saldos-fuerte').value = Math.round(s.fuerte || 0);
+  document.getElementById('saldos-banco').value  = Math.round(s.banco || 0);
+  ov.dataset.mes = mes;
+  ov.style.display = 'flex';
+}
+function cerrarSaldosIniciales() {
+  document.getElementById('saldos-overlay').style.display = 'none';
+}
+async function guardarSaldosIniciales() {
+  const ov = document.getElementById('saldos-overlay');
+  const mes = ov.dataset.mes;
+  const num = id => parseFloat(String(document.getElementById(id).value).replace(/[^0-9.-]/g,'')) || 0;
+  const saldos = { caja: num('saldos-caja'), fuerte: num('saldos-fuerte'), banco: num('saldos-banco') };
+  const ok = await guardarSaldoInicial(mes, saldos);
+  if(ok) {
+    showToast('✅ Saldos iniciales guardados');
+    cerrarSaldosIniciales();
+    generarFlujoCaja();
+  }
+}
+
 
 // ════════════════════════════════════════
 // LIMPIAR FORMULARIO
