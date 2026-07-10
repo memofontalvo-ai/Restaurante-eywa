@@ -946,6 +946,11 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
       P&G Mensual
     </button>
+    <div class="nav-divider"></div>
+    <button class="nav-btn" id="navbtn-flujo" onclick="showPage('flujo',this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M3 12h18M3 18h12"/><path d="M17 15l3 3-3 3"/></svg>
+      Flujo de Caja
+    </button>
     <div class="nav-divider" id="nav-div-admin"></div>
     <button class="nav-btn" id="navbtn-admin" onclick="showPage('admin',this)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/><path d="M18 14l2 2 4-4"/></svg>
@@ -1307,6 +1312,29 @@
 <!-- ════════════════════════════════════════
      PAGE: ANÁLISIS FINANCIERO GLOBAL
 ════════════════════════════════════════ -->
+<!-- ════════════════════════
+     FLUJO DE CAJA
+     ════════════════════════ -->
+<div class="page" id="page-flujo">
+<div class="container">
+  <div class="page-header" style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px;">
+    <div>
+      <h1>Flujo de Caja</h1>
+      <p>Movimiento real del dinero: lo que entra y lo que sale</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+      <div class="field" style="flex:0 0 180px;">
+        <label>Mes</label>
+        <input type="month" id="mes_flujo" onchange="generarFlujoCaja()"
+          style="background:var(--dark3);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:9px 12px;color:var(--text);font-family:'DM Sans',sans-serif;font-size:0.88rem;">
+      </div>
+      <button class="btn btn-outline" onclick="generarFlujoCaja()">🔄 Actualizar</button>
+    </div>
+  </div>
+  <div id="flujo_content"></div>
+</div>
+</div>
+
 <div class="page" id="page-analisis">
 <div class="container">
   <div class="page-header" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;">
@@ -1635,6 +1663,11 @@ function showPage(id, btn) {
     const hoy = new Date();
     document.getElementById('mes_pyg').value = hoy.toISOString().slice(0,7);
   }
+  if(id === 'flujo') {
+    const elMes = document.getElementById('mes_flujo');
+    if(elMes && !elMes.value) elMes.value = new Date().toISOString().slice(0,7);
+    generarFlujoCaja();
+  }
   if(id === 'analisis') renderAnalisisGlobal();
   if(id === 'admin') {
     const hoy = new Date();
@@ -1721,6 +1754,7 @@ function doLogin() {
   cargarBorrador();
   cargarDatosFirebase();
   cargarEgresosAdminFirebase();
+  cargarPagosAdminFirebase();
 }
 
 function doLogout() {
@@ -2602,6 +2636,183 @@ function generarPYG() {
       <div class="stat-chip"><div class="label">Días Operados</div><div class="value">${data.length}</div></div>
       <div class="stat-chip"><div class="label">Margen Neto</div><div class="value ${resultado>=0?'green':'red'}">${pct(resultado,totalVentas)}</div></div>
     </div>
+  </div>`;
+}
+
+
+// ════════════════════════════════════════
+// FLUJO DE CAJA
+// ════════════════════════════════════════
+// Coleccion para los pagos de facturas administrativas (se conectara al importar el Excel)
+const COLL_PAGOS_ADMIN = 'pagos_admin';
+let _pagosAdminCache = [];
+
+async function cargarPagosAdminFirebase() {
+  try {
+    const snap = await db.collection(COLL_PAGOS_ADMIN).get();
+    _pagosAdminCache = snap.docs.map(d => d.data());
+  } catch(e) {
+    // La coleccion aun no existe: no es error
+    _pagosAdminCache = [];
+  }
+}
+
+function generarFlujoCaja() {
+  const mes = document.getElementById('mes_flujo').value;
+  const cont = document.getElementById('flujo_content');
+  if(!mes) { cont.innerHTML = '<div class="card" style="text-align:center;padding:40px;color:var(--text-muted);">Selecciona un mes.</div>'; return; }
+
+  const todos = getData();
+  const data = todos.filter(d => d.fecha.startsWith(mes)).sort((a,b) => a.fecha.localeCompare(b.fecha));
+  if(data.length === 0) {
+    cont.innerHTML = '<div class="card" style="text-align:center;padding:40px;color:var(--text-muted);">No hay cuadres registrados para este mes.</div>';
+    return;
+  }
+
+  const [year, mon] = mes.split('-');
+  const nombreMes = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][parseInt(mon)-1];
+
+  // ── SALDO INICIAL: saldo final del ultimo cuadre ANTERIOR a este mes ──
+  const anteriores = todos.filter(d => d.fecha < mes + '-01').sort((a,b) => a.fecha.localeCompare(b.fecha));
+  const saldoInicial = anteriores.length ? (anteriores[anteriores.length-1].saldo_final || 0) : 0;
+  const fuenteSaldo = anteriores.length
+    ? 'Saldo final del ' + formatFecha(anteriores[anteriores.length-1].fecha)
+    : 'Sin mes anterior registrado — se asume $0';
+
+  // ── ENTRADAS: ventas que entran de verdad (CxC NO entra hasta cobrarse) ──
+  const totalEf = data.reduce((a,d) => a + (d.efectivo||0), 0);
+  const totalDf = data.reduce((a,d) => a + (d.datafono||0), 0);
+  const totalTr = data.reduce((a,d) => a + (d.transferencia||0), 0);
+  const totalCxc = data.reduce((a,d) => a + (d.cxc||0), 0);
+  const totalPropinas = data.reduce((a,d) => a + (d.propina||0), 0);
+  const recaudado = totalEf + totalDf + totalTr;   // incluye propinas, excluye CxC
+
+  // Otros ingresos de efectivo registrados en el cuadre
+  const anticipoEf = data.reduce((a,d) => a + (d.anticipo_ef||0), 0);
+  const efTerceros = data.reduce((a,d) => a + (d.ef_terceros||0), 0);
+  const totalEntradas = recaudado + anticipoEf + efTerceros;
+
+  // ── SALIDAS ──
+  const egresosCaja = data.reduce((a,d) => a + (d.total_egresos||0), 0);
+  const pagosAdmin = _pagosAdminCache
+    .filter(p => (p.periodo_pago || String(p.fecha_pago||'').slice(0,7)) === mes)
+    .reduce((a,p) => a + (p.valor||0), 0);
+  const totalSalidas = egresosCaja + pagosAdmin;
+
+  // ── SALDO FINAL ──
+  const saldoFinal = saldoInicial + totalEntradas - totalSalidas;
+
+  // ── Traslados a caja fuerte (movimiento interno, informativo) ──
+  const traslados = data.reduce((a,d) => a + (d.traslado_fuerte||0), 0);
+
+  // ── Facturas administrativas causadas este mes (deuda) ──
+  const causadoAdmin = _egrAdminCache.filter(r => r.periodo === mes).reduce((a,r) => a + r.valor, 0);
+  const pendientePago = causadoAdmin - pagosAdmin;
+
+  const fmtPct = (v, base) => base ? ((v/base)*100).toFixed(1) + '%' : '0%';
+
+  cont.innerHTML = `<div class="card">
+    <div style="text-align:center;margin-bottom:24px;">
+      <div style="font-family:'Playfair Display',serif;font-size:1.6rem;color:var(--gold);">RESTAURANTE EYWA</div>
+      <div style="color:var(--text-muted);font-size:0.9rem;margin-top:4px;">Flujo de Caja — ${nombreMes} ${year}</div>
+      <div style="color:var(--text-muted);font-size:0.78rem;margin-top:2px;">${data.length} días operados</div>
+    </div>
+
+    <div class="pyg-section">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🏁 Saldo Inicial</div>
+      <div class="pyg-line total"><span>Saldo al iniciar el mes</span><span style="color:var(--gold)">${fmt(saldoInicial)}</span></div>
+      <div style="color:var(--text-muted);font-size:0.74rem;padding:4px 12px;">${fuenteSaldo}</div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="pyg-section">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">📥 Entradas de Dinero</div>
+      <div class="pyg-line"><span>Ventas en Efectivo</span><span style="color:var(--green)">+${fmt(totalEf)}</span></div>
+      <div class="pyg-line"><span>Ventas por Datáfono</span><span style="color:var(--green)">+${fmt(totalDf)}</span></div>
+      <div class="pyg-line"><span>Ventas por Transferencia</span><span style="color:var(--green)">+${fmt(totalTr)}</span></div>
+      ${anticipoEf ? `<div class="pyg-line"><span>Anticipos en Efectivo</span><span style="color:var(--green)">+${fmt(anticipoEf)}</span></div>` : ''}
+      ${efTerceros ? `<div class="pyg-line"><span>Efectivo de Terceros</span><span style="color:var(--green)">+${fmt(efTerceros)}</span></div>` : ''}
+      <div class="pyg-line total"><span>TOTAL ENTRADAS</span><span style="color:var(--green)">+${fmt(totalEntradas)}</span></div>
+      <div style="color:var(--text-muted);font-size:0.74rem;padding:6px 12px;">Incluye propinas por ${fmt(totalPropinas)}. Las ventas a crédito (CxC) por ${fmt(totalCxc)} NO se cuentan hasta cobrarse.</div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="pyg-section">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">📤 Salidas de Dinero</div>
+      <div class="pyg-line"><span>Egresos pagados por Caja</span><span style="color:var(--red)">-${fmt(egresosCaja)}</span></div>
+      <div class="pyg-line">
+        <span>Pagos de Facturas Administrativas</span>
+        <span style="color:var(--red)">-${fmt(pagosAdmin)}</span>
+      </div>
+      ${pagosAdmin === 0 ? `<div style="color:var(--text-muted);font-size:0.74rem;padding:4px 12px;">Aún no se han importado pagos administrativos para este mes.</div>` : ''}
+      <div class="pyg-line total"><span>TOTAL SALIDAS</span><span style="color:var(--red)">-${fmt(totalSalidas)}</span></div>
+    </div>
+
+    <div class="divider"></div>
+    <div style="border-radius:10px;padding:20px 24px;${saldoFinal>=0?'background:rgba(76,175,122,.08);border:1px solid rgba(76,175,122,.25);':'background:rgba(224,85,85,.08);border:1px solid rgba(224,85,85,.25);'}">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <div>
+          <div style="font-family:'Playfair Display',serif;font-size:1.15rem;">${saldoFinal>=0?'💵 Saldo Final de Caja':'🔻 Saldo Negativo'}</div>
+          <div style="color:var(--text-muted);font-size:0.8rem;margin-top:2px;">Inicial ${fmt(saldoInicial)} + Entradas ${fmt(totalEntradas)} − Salidas ${fmt(totalSalidas)}</div>
+          <div style="color:var(--text-muted);font-size:0.75rem;margin-top:2px;">Este será el saldo inicial del mes siguiente.</div>
+        </div>
+        <div style="font-size:2rem;font-weight:700;color:${saldoFinal>=0?'var(--green)':'var(--red)'}">${fmt(saldoFinal)}</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div style="border-radius:10px;padding:18px 22px;background:rgba(201,168,76,0.06);border:1px solid rgba(201,168,76,0.25);">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;">📋 Facturas Administrativas (causadas vs pagadas)</div>
+      <div class="pyg-line"><span>Causado este mes (facturas recibidas)</span><span style="color:var(--text)">${fmt(causadoAdmin)}</span></div>
+      <div class="pyg-line"><span>Pagado este mes</span><span style="color:var(--green)">${fmt(pagosAdmin)}</span></div>
+      <div class="pyg-line total" style="border-top:1px solid rgba(255,255,255,0.1);margin-top:6px;padding-top:10px;">
+        <span>PENDIENTE POR PAGAR</span>
+        <span style="color:${pendientePago>0?'var(--gold)':'var(--green)'}">${fmt(pendientePago)}</span>
+      </div>
+      <div style="color:var(--text-muted);font-size:0.74rem;padding:6px 12px;">Las facturas causadas NO afectan el flujo de caja hasta que se pagan.</div>
+    </div>
+
+    ${traslados > 0 ? `
+    <div class="divider"></div>
+    <div class="pyg-section">
+      <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">🏦 Movimientos Internos</div>
+      <div class="pyg-line" style="background:rgba(201,168,76,0.05);border-radius:8px;padding:10px 12px;">
+        <span style="display:flex;align-items:center;gap:6px;">
+          <span style="background:rgba(201,168,76,0.15);color:var(--gold);padding:2px 8px;border-radius:20px;font-size:0.74rem;">INTERNO</span>
+          Traslado a Caja Fuerte
+        </span>
+        <span style="color:var(--gold);">${fmt(traslados)}</span>
+      </div>
+      <div style="color:var(--text-muted);font-size:0.75rem;padding:6px 12px;">Ya está descontado dentro del saldo final de cada cuadre.</div>
+    </div>` : ''}
+
+    <div class="divider"></div>
+    <div class="grid-4" style="margin-top:4px;">
+      <div class="stat-chip"><div class="label">Entradas</div><div class="value green">${fmt(totalEntradas)}</div></div>
+      <div class="stat-chip"><div class="label">Salidas</div><div class="value red">${fmt(totalSalidas)}</div></div>
+      <div class="stat-chip"><div class="label">Variación de Caja</div><div class="value ${(totalEntradas-totalSalidas)>=0?'green':'red'}">${(totalEntradas-totalSalidas)>=0?'+':'-'}${fmt(Math.abs(totalEntradas-totalSalidas))}</div></div>
+      <div class="stat-chip"><div class="label">Salidas / Entradas</div><div class="value">${fmtPct(totalSalidas, totalEntradas)}</div></div>
+    </div>
+
+    <div class="divider"></div>
+    <div style="color:var(--text-muted);font-size:0.75rem;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">📆 Detalle Diario</div>
+    <div class="tbl-wrap"><table class="tbl"><thead><tr>
+      <th>Fecha</th><th>Efectivo</th><th>Datáfono</th><th>Transfer.</th><th>Entradas</th><th>Egresos Caja</th><th>Neto del Día</th>
+    </tr></thead><tbody>
+    ${data.map(d => {
+      const ent = (d.efectivo||0)+(d.datafono||0)+(d.transferencia||0);
+      const neto = ent - (d.total_egresos||0);
+      return `<tr>
+        <td>${formatFecha(d.fecha)}</td>
+        <td class="num">${fmt(d.efectivo||0)}</td>
+        <td class="num">${fmt(d.datafono||0)}</td>
+        <td class="num">${fmt(d.transferencia||0)}</td>
+        <td class="num" style="color:var(--green)">${fmt(ent)}</td>
+        <td class="num" style="color:var(--red)">${fmt(d.total_egresos||0)}</td>
+        <td class="num" style="color:${neto>=0?'var(--green)':'var(--red)'}">${neto>=0?'+':'-'}${fmt(Math.abs(neto))}</td>
+      </tr>`;
+    }).join('')}
+    </tbody></table></div>
   </div>`;
 }
 
